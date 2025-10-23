@@ -295,6 +295,7 @@ class MiniRAG:
             namespace="chunks",
             global_config=asdict(self),
             embedding_func=self.embedding_func,
+            meta_fields={"source", "full_doc_id"},
         )
 
         self.llm_model_func = limit_async_func_call(self.llm_model_max_async)(
@@ -337,13 +338,14 @@ class MiniRAG:
             # set client
             storage.db = db_client
 
-    def insert(self, string_or_strings):
+    def insert(self, string_or_strings, metadatas: dict | list[dict] | None = None):
         loop = always_get_an_event_loop()
-        return loop.run_until_complete(self.ainsert(string_or_strings))
+        return loop.run_until_complete(self.ainsert(string_or_strings, metadatas))
 
     async def ainsert(
         self,
         input: str | list[str],
+        metadatas: dict | list[dict] | None = None,
         split_by_character: str | None = None,
         split_by_character_only: bool = False,
         ids: str | list[str] | None = None,
@@ -352,8 +354,10 @@ class MiniRAG:
             input = [input]
         if isinstance(ids, str):
             ids = [ids]
+        if isinstance(metadatas, dict):
+            metadatas = [metadatas]
 
-        await self.apipeline_enqueue_documents(input, ids)
+        await self.apipeline_enqueue_documents(input, ids, metadatas)
         await self.apipeline_process_enqueue_documents(
             split_by_character, split_by_character_only
         )
@@ -389,7 +393,10 @@ class MiniRAG:
         await self._insert_done()
 
     async def apipeline_enqueue_documents(
-        self, input: str | list[str], ids: list[str] | None = None
+        self,
+        input: str | list[str],
+        ids: list[str] | None = None,
+        metadatas: list[dict] | None = None,
     ) -> None:
         """
         Pipeline for Processing Documents
@@ -421,17 +428,18 @@ class MiniRAG:
                 content: id_ for id_, content in contents.items()
             }.items()
         }
-        new_docs: dict[str, Any] = {
-            id_: {
+        new_docs: dict[str, Any] = {}
+        for idx, (id_, content) in enumerate(unique_contents.items()):
+            doc_metadata = metadatas[idx] if metadatas and idx < len(metadatas) else {}
+            new_docs[id_] = {
                 "content": content,
                 "content_summary": get_content_summary(content),
                 "content_length": len(content),
                 "status": DocStatus.PENDING,
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
+                "metadata": doc_metadata,
             }
-            for id_, content in unique_contents.items()
-        }
 
         all_new_doc_ids = set(new_docs.keys())
         unique_new_doc_ids = await self.doc_status.filter_keys(all_new_doc_ids)
@@ -485,6 +493,7 @@ class MiniRAG:
                     compute_mdhash_id(dp["content"], prefix="chunk-"): {
                         **dp,
                         "full_doc_id": doc_id,
+                        **status_doc.metadata,
                     }
                     for dp in self.chunking_func(
                         status_doc.content,
@@ -495,7 +504,9 @@ class MiniRAG:
                 }
                 await asyncio.gather(
                     self.chunks_vdb.upsert(chunks),
-                    self.full_docs.upsert({doc_id: {"content": status_doc.content}}),
+                    self.full_docs.upsert(
+                        {doc_id: {"content": status_doc.content, **status_doc.metadata}}
+                    ),
                     self.text_chunks.upsert(chunks),
                 )
                 await self.doc_status.upsert(

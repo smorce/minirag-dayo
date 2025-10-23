@@ -38,6 +38,7 @@ class QueryParam:
 
     hl_keywords: list[str] = field(default_factory=list)
     ll_keywords: list[str] = field(default_factory=list)
+    metadata_filter: Optional[dict] = field(default_factory=dict)
     # Conversation history support
     conversation_history: list[dict] = field(
         default_factory=list
@@ -66,7 +67,9 @@ class BaseVectorStorage(StorageNameSpace):
     embedding_func: EmbeddingFunc
     meta_fields: set = field(default_factory=set)
 
-    async def query(self, query: str, top_k: int) -> list[dict]:
+    async def query(
+        self, query: str, top_k: int, metadata_filter: Optional[dict] = None
+    ) -> list[dict]:
         raise NotImplementedError
 
     async def upsert(self, data: dict[str, dict]):

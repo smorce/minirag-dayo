@@ -87,11 +87,22 @@ for WEEK in WEEK_LIST:
     id = WEEK_LIST.index(WEEK)
     print(f"{id}/{len(WEEK_LIST)}")
     with open(WEEK) as f:
-        rag.insert(f.read())
+        rag.insert(f.read(), metadatas={"source": os.path.basename(WEEK)})
 
 # A toy query
 query = 'What does LiHua predict will happen in "The Rings of Power"?'
 answer = (
     rag.query(query, param=QueryParam(mode="mini")).replace("\n", "").replace("\r", "")
 )
-print(answer)
+print(f"Answer: {answer}")
+
+# A toy query with metadata filter
+print("\nQuery with metadata filter:")
+answer = rag.query(
+    query,
+    param=QueryParam(
+        mode="mini",
+        metadata_filter={"source": "lihua_world_week_1.txt"},
+    ),
+).replace("\n", "")
+print(f"Answer: {answer}")

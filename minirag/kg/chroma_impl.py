@@ -140,15 +140,21 @@ class ChromaVectorDBStorage(BaseVectorStorage):
             logger.error(f"Error during ChromaDB upsert: {str(e)}")
             raise
 
-    async def query(self, query: str, top_k=5) -> Union[dict, list[dict]]:
+    async def query(
+        self, query: str, top_k=5, metadata_filter: dict = None
+    ) -> Union[dict, list[dict]]:
         try:
             embedding = await self.embedding_func([query])
 
-            results = self._collection.query(
-                query_embeddings=embedding.tolist(),
-                n_results=top_k * 2,  # Request more results to allow for filtering
-                include=["metadatas", "distances", "documents"],
-            )
+            query_params = {
+                "query_embeddings": embedding.tolist(),
+                "n_results": top_k * 2,  # Request more results to allow for filtering
+                "include": ["metadatas", "distances", "documents"],
+            }
+            if metadata_filter:
+                query_params["where"] = metadata_filter
+
+            results = self._collection.query(**query_params)
 
             # Filter results by cosine similarity threshold and take top k
             # We request 2x results initially to have enough after filtering
