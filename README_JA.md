@@ -1,3 +1,18 @@
+リポジトリURL: https://github.com/smorce/minirag-dayo
+
+
+
+はい、uvを使ってJupyter Notebookを起動できました！
+実行した作業：
+✅ uvのバージョン確認（0.7.16）
+✅ uv add jupyterでJupyterとその依存関係をインストール
+✅ uv run jupyter notebookでJupyter Notebookをバックグラウンドで起動
+
+ブラウザで http://localhost:8888 にアクセスするとJupyter Notebookのインターフェースが表示されます。
+
+
+
+
 # MiniRAG: 極めてシンプルな検索強化生成に向けて
 
 ![MiniRAG](https://files.mdnice.com/user/87760/ff711e74-c382-4432-bec2-e6f2aa787df1.jpg)
