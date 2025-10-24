@@ -34,6 +34,51 @@ from .prompt import GRAPH_FIELD_SEP, PROMPTS
 from .metadata import metadata_matches
 
 
+async def _filter_items_by_metadata(
+    items: list[dict[str, Any]],
+    text_chunks_db: BaseKVStorage[TextChunkSchema],
+    metadata_filters: dict[str, Any],
+    chunk_metadata_cache: dict[str, dict[str, Any] | None] | None = None,
+) -> list[dict[str, Any]]:
+    if not metadata_filters or not items:
+        return items
+
+    cache = chunk_metadata_cache if chunk_metadata_cache is not None else {}
+    filtered_items: list[dict[str, Any]] = []
+
+    for item in items:
+        source_id = item.get("source_id", "")
+        if not source_id:
+            continue
+
+        chunk_ids = [
+            chunk_id
+            for chunk_id in split_string_by_multi_markers(
+                source_id, [GRAPH_FIELD_SEP]
+            )
+            if chunk_id
+        ]
+
+        if not chunk_ids:
+            continue
+
+        missing_chunk_ids = [cid for cid in chunk_ids if cid not in cache]
+        if missing_chunk_ids:
+            fetched_chunks = await text_chunks_db.get_by_ids(missing_chunk_ids)
+            for cid, chunk_data in zip(missing_chunk_ids, fetched_chunks):
+                cache[cid] = chunk_data
+
+        chunk_metadatas = [cache.get(cid) for cid in chunk_ids]
+        if any(
+            chunk_metadata is not None
+            and metadata_matches(chunk_metadata, metadata_filters)
+            for chunk_metadata in chunk_metadatas
+        ):
+            filtered_items.append(item)
+
+    return filtered_items
+
+
 def chunking_by_token_size(
     content: str, overlap_token_size=128, max_token_size=1024, tiktoken_model="gpt-4o"
 ):
@@ -488,6 +533,8 @@ async def _build_local_query_context(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
 ):
+    metadata_filters = query_param.metadata_filters or {}
+    chunk_metadata_cache: dict[str, dict[str, Any] | None] = {}
     results = await entities_vdb.query(query, top_k=query_param.top_k)
 
     if not len(results):
@@ -505,13 +552,27 @@ async def _build_local_query_context(
         for k, n, d in zip(results, node_datas, node_degrees)
         if n is not None
     ]  # what is this text_chunks_db doing.  dont remember it in airvx.  check the diagram.
+    if metadata_filters:
+        node_datas = await _filter_items_by_metadata(
+            node_datas, text_chunks_db, metadata_filters, chunk_metadata_cache
+        )
+        if not node_datas:
+            return None
     use_text_units = await _find_most_related_text_unit_from_entities(
-        node_datas, query_param, text_chunks_db, knowledge_graph_inst
+        node_datas,
+        query_param,
+        text_chunks_db,
+        knowledge_graph_inst,
+        chunk_metadata_cache=chunk_metadata_cache,
     )
     use_relations = await _find_most_related_edges_from_entities(
         node_datas, query_param, knowledge_graph_inst
     )
-    if query_param.metadata_filters and not use_text_units:
+    if metadata_filters:
+        use_relations = await _filter_items_by_metadata(
+            use_relations, text_chunks_db, metadata_filters, chunk_metadata_cache
+        )
+    if metadata_filters and not use_text_units:
         return None
     logger.info(
         f"Local query uses {len(node_datas)} entites, {len(use_relations)} relations, {len(use_text_units)} text units"
@@ -571,8 +632,11 @@ async def _find_most_related_text_unit_from_entities(
     query_param: QueryParam,
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     knowledge_graph_inst: BaseGraphStorage,
+    *,
+    chunk_metadata_cache: dict[str, dict[str, Any] | None] | None = None,
 ):
     metadata_filters = query_param.metadata_filters or {}
+    cache = chunk_metadata_cache if chunk_metadata_cache is not None else {}
     text_units = [
         split_string_by_multi_markers(dp["source_id"], [GRAPH_FIELD_SEP])
         for dp in node_datas
@@ -612,10 +676,16 @@ async def _find_most_related_text_unit_from_entities(
                     ):
                         relation_counts += 1
 
-            chunk_data = await text_chunks_db.get_by_id(c_id)
+            if c_id in cache:
+                chunk_data = cache[c_id]
+            else:
+                chunk_data = await text_chunks_db.get_by_id(c_id)
+                cache[c_id] = chunk_data
             if metadata_filters and chunk_data is not None:
                 if not metadata_matches(chunk_data, metadata_filters):
                     chunk_data = None
+            if chunk_metadata_cache is not None:
+                cache[c_id] = chunk_data
 
             if chunk_data is not None and "content" in chunk_data:  # Add content check
                 all_text_units_lookup[c_id] = {
@@ -767,6 +837,8 @@ async def _build_global_query_context(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
 ):
+    metadata_filters = query_param.metadata_filters or {}
+    chunk_metadata_cache: dict[str, dict[str, Any] | None] = {}
     results = await relationships_vdb.query(keywords, top_k=query_param.top_k)
 
     if not len(results):
@@ -794,14 +866,28 @@ async def _build_global_query_context(
         key=lambda x: x["description"],
         max_token_size=query_param.max_token_for_global_context,
     )
+    if metadata_filters:
+        edge_datas = await _filter_items_by_metadata(
+            edge_datas, text_chunks_db, metadata_filters, chunk_metadata_cache
+        )
+        if not edge_datas:
+            return None
 
     use_entities = await _find_most_related_entities_from_relationships(
         edge_datas, query_param, knowledge_graph_inst
     )
+    if metadata_filters:
+        use_entities = await _filter_items_by_metadata(
+            use_entities, text_chunks_db, metadata_filters, chunk_metadata_cache
+        )
     use_text_units = await _find_related_text_unit_from_relationships(
-        edge_datas, query_param, text_chunks_db, knowledge_graph_inst
+        edge_datas,
+        query_param,
+        text_chunks_db,
+        knowledge_graph_inst,
+        chunk_metadata_cache=chunk_metadata_cache,
     )
-    if query_param.metadata_filters and not use_text_units:
+    if metadata_filters and not use_text_units:
         return None
     logger.info(
         f"Global query uses {len(use_entities)} entites, {len(edge_datas)} relations, {len(use_text_units)} text units"
@@ -893,8 +979,11 @@ async def _find_related_text_unit_from_relationships(
     query_param: QueryParam,
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     knowledge_graph_inst: BaseGraphStorage,
+    *,
+    chunk_metadata_cache: dict[str, dict[str, Any] | None] | None = None,
 ):
     metadata_filters = query_param.metadata_filters or {}
+    cache = chunk_metadata_cache if chunk_metadata_cache is not None else {}
     text_units = [
         split_string_by_multi_markers(dp["source_id"], [GRAPH_FIELD_SEP])
         for dp in edge_datas
@@ -905,10 +994,16 @@ async def _find_related_text_unit_from_relationships(
     for index, unit_list in enumerate(text_units):
         for c_id in unit_list:
             if c_id not in all_text_units_lookup:
-                chunk_data = await text_chunks_db.get_by_id(c_id)
+                if c_id in cache:
+                    chunk_data = cache[c_id]
+                else:
+                    chunk_data = await text_chunks_db.get_by_id(c_id)
+                    cache[c_id] = chunk_data
                 if metadata_filters and chunk_data is not None:
                     if not metadata_matches(chunk_data, metadata_filters):
                         chunk_data = None
+                if chunk_metadata_cache is not None:
+                    cache[c_id] = chunk_data
                 all_text_units_lookup[c_id] = {
                     "data": chunk_data,
                     "order": index,
@@ -1340,6 +1435,8 @@ async def _build_mini_query_context(
     embedder,
     query_param: QueryParam,
 ):
+    metadata_filters = query_param.metadata_filters or {}
+    chunk_metadata_cache: dict[str, dict[str, Any] | None] = {}
     imp_ents = []
     nodes_from_query_list = []
     ent_from_query_dict = {}
@@ -1428,6 +1525,18 @@ async def _build_mini_query_context(
         {**n, "entity_name": k, "Score": scored_edged_reasoning_path[k]["Score"]}
         for k, n in zip(scored_edged_reasoning_path.keys(), node_datas)
     ]
+    if metadata_filters:
+        node_datas = await _filter_items_by_metadata(
+            node_datas, text_chunks_db, metadata_filters, chunk_metadata_cache
+        )
+        allowed_entities = {n["entity_name"] for n in node_datas}
+        scored_edged_reasoning_path = {
+            entity: scored_edged_reasoning_path[entity]
+            for entity in scored_edged_reasoning_path
+            if entity in allowed_entities
+        }
+        if not node_datas:
+            return None
     for i, n in enumerate(node_datas):
         entites_section_list.append(
             [
@@ -1449,9 +1558,6 @@ async def _build_mini_query_context(
     entities_context = list_of_list_to_csv(entites_section_list)
 
     scorednode2chunk(ent_from_query_dict, scored_edged_reasoning_path)
-
-    metadata_filters = query_param.metadata_filters or {}
-    chunk_metadata_cache: dict[str, dict[str, Any]] = {}
 
     results = await chunks_vdb.query(
         originalquery,
