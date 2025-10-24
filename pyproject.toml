@@ -29,6 +29,7 @@ dependencies = [
     "pip>=25.2",
     "pipmaster>=1.0.9",
     "protobuf>=6.33.0",
+    "pytest>=8.4.2",
     "python-dotenv>=1.1.1",
     "rouge>=1.0.1",
     "sentence-transformers>=5.1.2",
