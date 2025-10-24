@@ -6,7 +6,7 @@
 実行した作業：
 ✅ uvのバージョン確認（0.7.16）
 ✅ uv add jupyterでJupyterとその依存関係をインストール
-✅ uv run jupyter notebookでJupyter Notebookをバックグラウンドで起動
+✅ uv run jupyter notebook でJupyter Notebookをバックグラウンドで起動
 
 ブラウザで http://localhost:8888 にアクセスするとJupyter Notebookのインターフェースが表示されます。
 
