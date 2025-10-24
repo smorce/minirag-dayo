@@ -1516,6 +1516,11 @@ async def _build_mini_query_context(
         use_text_units = await asyncio.gather(
             *[text_chunks_db.get_by_id(id) for id in final_chunk_id]
         )
+
+    if metadata_filters:
+        use_text_units = [
+            chunk for chunk in use_text_units if chunk and metadata_matches(chunk, metadata_filters)
+        ]
     text_units_section_list = [["id", "content"]]
 
     for i, t in enumerate(use_text_units):
