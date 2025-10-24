@@ -1,7 +1,7 @@
 import asyncio
 import json
 import re
-from typing import Union
+from typing import Union, Any
 from collections import Counter, defaultdict
 import warnings
 import json_repair
@@ -31,6 +31,7 @@ from .base import (
     QueryParam,
 )
 from .prompt import GRAPH_FIELD_SEP, PROMPTS
+from .metadata import metadata_matches
 
 
 def chunking_by_token_size(
@@ -1372,7 +1373,37 @@ async def _build_mini_query_context(
 
     scorednode2chunk(ent_from_query_dict, scored_edged_reasoning_path)
 
-    results = await chunks_vdb.query(originalquery, top_k=int(query_param.top_k / 2))
+    metadata_filters = query_param.metadata_filters or {}
+    chunk_metadata_cache: dict[str, dict[str, Any]] = {}
+
+    results = await chunks_vdb.query(
+        originalquery,
+        top_k=int(query_param.top_k / 2),
+        metadata_filters=query_param.metadata_filters,
+    )
+
+    if metadata_filters:
+        chunk_details = await asyncio.gather(
+            *[text_chunks_db.get_by_id(r["id"]) for r in results]
+        )
+        filtered_results = []
+        for result, detail in zip(results, chunk_details):
+            combined_metadata = {
+                key: value
+                for key, value in result.items()
+                if key not in {"id", "content", "distance"}
+            }
+            if detail:
+                combined_metadata.update(detail)
+                chunk_metadata_cache[result["id"]] = detail
+            elif combined_metadata:
+                chunk_metadata_cache[result["id"]] = combined_metadata
+
+            if metadata_matches(combined_metadata, metadata_filters):
+                filtered_results.append(result)
+
+        results = filtered_results
+
     chunks_ids = [r["id"] for r in results]
     final_chunk_id = kwd2chunk(
         ent_from_query_dict, chunks_ids, chunk_nums=int(query_param.top_k / 2)
@@ -1384,9 +1415,30 @@ async def _build_mini_query_context(
     if not len(results_edge):
         return None
 
-    use_text_units = await asyncio.gather(
-        *[text_chunks_db.get_by_id(id) for id in final_chunk_id]
-    )
+    if metadata_filters:
+        use_text_units = []
+        missing_chunk_ids = []
+        missing_indices = []
+
+        for index, chunk_id in enumerate(final_chunk_id):
+            cached = chunk_metadata_cache.get(chunk_id)
+            if cached is not None:
+                use_text_units.append(cached)
+            else:
+                use_text_units.append(None)
+                missing_chunk_ids.append(chunk_id)
+                missing_indices.append(index)
+
+        if missing_chunk_ids:
+            fetched_chunks = await asyncio.gather(
+                *[text_chunks_db.get_by_id(chunk_id) for chunk_id in missing_chunk_ids]
+            )
+            for idx, chunk_data in zip(missing_indices, fetched_chunks):
+                use_text_units[idx] = chunk_data
+    else:
+        use_text_units = await asyncio.gather(
+            *[text_chunks_db.get_by_id(id) for id in final_chunk_id]
+        )
     text_units_section_list = [["id", "content"]]
 
     for i, t in enumerate(use_text_units):

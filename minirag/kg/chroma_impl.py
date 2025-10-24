@@ -1,7 +1,7 @@
 import os
 import asyncio
 from dataclasses import dataclass
-from typing import Union
+from typing import Union, Optional, Any
 import numpy as np
 from chromadb import HttpClient
 from chromadb.config import Settings
@@ -140,7 +140,12 @@ class ChromaVectorDBStorage(BaseVectorStorage):
             logger.error(f"Error during ChromaDB upsert: {str(e)}")
             raise
 
-    async def query(self, query: str, top_k=5) -> Union[dict, list[dict]]:
+    async def query(
+        self,
+        query: str,
+        top_k=5,
+        metadata_filters: Optional[dict[str, Any]] = None,
+    ) -> Union[dict, list[dict]]:
         try:
             embedding = await self.embedding_func([query])
 
@@ -148,6 +153,7 @@ class ChromaVectorDBStorage(BaseVectorStorage):
                 query_embeddings=embedding.tolist(),
                 n_results=top_k * 2,  # Request more results to allow for filtering
                 include=["metadatas", "distances", "documents"],
+                where=metadata_filters,
             )
 
             # Filter results by cosine similarity threshold and take top k

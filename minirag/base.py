@@ -21,6 +21,7 @@ class QueryParam:
     only_need_prompt: bool = False
     # When True, return structured provenance (entities/chunks) along with the answer or context
     include_provenance: bool = False
+    metadata_filters: Optional[dict[str, Any]] = None
     response_type: str = "Multiple Paragraphs"
     stream: bool = False
     # Number of top-k items to retrieve; corresponds to entities in "local" mode and relationships in "global" mode.
@@ -66,7 +67,12 @@ class BaseVectorStorage(StorageNameSpace):
     embedding_func: EmbeddingFunc
     meta_fields: set = field(default_factory=set)
 
-    async def query(self, query: str, top_k: int) -> list[dict]:
+    async def query(
+        self,
+        query: str,
+        top_k: int,
+        metadata_filters: Optional[dict[str, Any]] = None,
+    ) -> list[dict]:
         raise NotImplementedError
 
     async def upsert(self, data: dict[str, dict]):
