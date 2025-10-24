@@ -11,6 +11,10 @@
 ブラウザで http://localhost:8888 にアクセスするとJupyter Notebookのインターフェースが表示されます。
 
 
+>uv run python --version
+Python 3.12.11
+
+
 
 
 # MiniRAG: 極めてシンプルな検索強化生成に向けて
