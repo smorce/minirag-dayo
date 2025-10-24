@@ -145,3 +145,10 @@ class JsonDocStatusStorage(DocStatusStorage):
         for doc_id in doc_ids:
             self._data.pop(doc_id, None)
         await self.index_done_callback()
+
+    async def drop(self):
+        """Clear all document statuses"""
+        self._data = {}
+        if os.path.exists(self._file_name):
+            os.remove(self._file_name)
+        await self.index_done_callback()

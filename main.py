@@ -3,6 +3,7 @@
 # login(your_token)
 
 import os
+import sys
 from minirag import MiniRAG, QueryParam
 from minirag.llm.hf import (
     hf_model_complete,
@@ -25,11 +26,42 @@ def get_args():
     parser.add_argument(
         "--querypath", type=str, default="./dataset/LiHua-World/qa/query_set.csv"
     )
+    parser.add_argument(
+        "--metadata",
+        nargs="*",
+        default=[],
+        help="Metadata filters for queries in key=value format",
+    )
     args = parser.parse_args()
     return args
 
 
 args = get_args()
+
+
+def parse_metadata_filters(metadata_args: list[str]) -> dict[str, str]:
+    metadata = {}
+    for item in metadata_args:
+        if "=" not in item:
+            raise ValueError(
+                f"Invalid metadata filter '{item}'. Expected format key=value."
+            )
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(
+                f"Invalid metadata filter '{item}'. Key must not be empty."
+            )
+        metadata[key] = value
+    return metadata
+
+
+try:
+    METADATA_FILTERS = parse_metadata_filters(args.metadata)
+except ValueError as metadata_error:
+    print(metadata_error)
+    sys.exit(1)
 
 
 if args.model == "PHI":
@@ -50,6 +82,8 @@ QUERY_PATH = args.querypath
 OUTPUT_PATH = args.outputpath
 print("USING LLM:", LLM_MODEL)
 print("USING WORKING DIR:", WORKING_DIR)
+if METADATA_FILTERS:
+    print("USING METADATA FILTERS:", METADATA_FILTERS)
 
 
 if not os.path.exists(WORKING_DIR):
@@ -87,22 +121,12 @@ for WEEK in WEEK_LIST:
     id = WEEK_LIST.index(WEEK)
     print(f"{id}/{len(WEEK_LIST)}")
     with open(WEEK) as f:
-        rag.insert(f.read(), metadatas={"source": os.path.basename(WEEK)})
+        rag.insert(f.read())
 
 # A toy query
 query = 'What does LiHua predict will happen in "The Rings of Power"?'
+query_param = QueryParam(mode="mini", metadata_filters=METADATA_FILTERS or None)
 answer = (
-    rag.query(query, param=QueryParam(mode="mini")).replace("\n", "").replace("\r", "")
+    rag.query(query, param=query_param).replace("\n", "").replace("\r", "")
 )
-print(f"Answer: {answer}")
-
-# A toy query with metadata filter
-print("\nQuery with metadata filter:")
-answer = rag.query(
-    query,
-    param=QueryParam(
-        mode="mini",
-        metadata_filter={"source": "lihua_world_week_1.txt"},
-    ),
-).replace("\n", "")
-print(f"Answer: {answer}")
+print(answer)

@@ -134,7 +134,12 @@ class NanoVectorDBStorage(BaseVectorStorage):
                 f"embedding is not 1-1 with data, {len(embeddings)} != {len(list_data)}"
             )
 
-    async def query(self, query: str, top_k=5):
+    async def query(
+        self,
+        query: str,
+        top_k=5,
+        metadata_filters=None,
+    ):
         embedding = await self.embedding_func([query])
         embedding = embedding[0]
         logger.info(

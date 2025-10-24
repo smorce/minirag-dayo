@@ -102,7 +102,11 @@ class JsonKVStorage(BaseKVStorage):
         return left_data
 
     async def drop(self):
-        self._data = {}
+        async with self._lock:
+            self._data = {}
+            if os.path.exists(self._file_name):
+                os.remove(self._file_name)
+            logger.info(f"Successfully dropped {self.namespace}")
 
     async def filter(self, filter_func):
         """Filter key-value pairs based on a filter function

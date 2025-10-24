@@ -30,7 +30,12 @@ class WeaviateVectorStorage(BaseVectorStorage):
         except WeaviateQueryException as e:
             print(f"Vector schema init error: {e}")
 
-    async def query(self, query: str, top_k: int) -> List[Dict]:
+    async def query(
+        self,
+        query: str,
+        top_k: int,
+        metadata_filters: Dict[str, Any] | None = None,
+    ) -> List[Dict]:
         try:
             near_text = {"concepts": [query]}
             response = await run_sync(

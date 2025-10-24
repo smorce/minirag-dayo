@@ -1,7 +1,7 @@
 import asyncio
 import json
 import re
-from typing import Union
+from typing import Union, Any
 from collections import Counter, defaultdict
 import warnings
 import json_repair
@@ -31,6 +31,7 @@ from .base import (
     QueryParam,
 )
 from .prompt import GRAPH_FIELD_SEP, PROMPTS
+from .metadata import metadata_matches
 
 
 def chunking_by_token_size(
@@ -487,9 +488,7 @@ async def _build_local_query_context(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
 ):
-    results = await entities_vdb.query(
-        query, top_k=query_param.top_k, metadata_filter=query_param.metadata_filter
-    )
+    results = await entities_vdb.query(query, top_k=query_param.top_k)
 
     if not len(results):
         return None
@@ -512,6 +511,8 @@ async def _build_local_query_context(
     use_relations = await _find_most_related_edges_from_entities(
         node_datas, query_param, knowledge_graph_inst
     )
+    if query_param.metadata_filters and not use_text_units:
+        return None
     logger.info(
         f"Local query uses {len(node_datas)} entites, {len(use_relations)} relations, {len(use_text_units)} text units"
     )
@@ -571,6 +572,7 @@ async def _find_most_related_text_unit_from_entities(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     knowledge_graph_inst: BaseGraphStorage,
 ):
+    metadata_filters = query_param.metadata_filters or {}
     text_units = [
         split_string_by_multi_markers(dp["source_id"], [GRAPH_FIELD_SEP])
         for dp in node_datas
@@ -611,6 +613,10 @@ async def _find_most_related_text_unit_from_entities(
                         relation_counts += 1
 
             chunk_data = await text_chunks_db.get_by_id(c_id)
+            if metadata_filters and chunk_data is not None:
+                if not metadata_matches(chunk_data, metadata_filters):
+                    chunk_data = None
+
             if chunk_data is not None and "content" in chunk_data:  # Add content check
                 all_text_units_lookup[c_id] = {
                     "data": chunk_data,
@@ -761,9 +767,7 @@ async def _build_global_query_context(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
 ):
-    results = await relationships_vdb.query(
-        keywords, top_k=query_param.top_k, metadata_filter=query_param.metadata_filter
-    )
+    results = await relationships_vdb.query(keywords, top_k=query_param.top_k)
 
     if not len(results):
         return None
@@ -797,6 +801,8 @@ async def _build_global_query_context(
     use_text_units = await _find_related_text_unit_from_relationships(
         edge_datas, query_param, text_chunks_db, knowledge_graph_inst
     )
+    if query_param.metadata_filters and not use_text_units:
+        return None
     logger.info(
         f"Global query uses {len(use_entities)} entites, {len(edge_datas)} relations, {len(use_text_units)} text units"
     )
@@ -888,6 +894,7 @@ async def _find_related_text_unit_from_relationships(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     knowledge_graph_inst: BaseGraphStorage,
 ):
+    metadata_filters = query_param.metadata_filters or {}
     text_units = [
         split_string_by_multi_markers(dp["source_id"], [GRAPH_FIELD_SEP])
         for dp in edge_datas
@@ -898,16 +905,25 @@ async def _find_related_text_unit_from_relationships(
     for index, unit_list in enumerate(text_units):
         for c_id in unit_list:
             if c_id not in all_text_units_lookup:
+                chunk_data = await text_chunks_db.get_by_id(c_id)
+                if metadata_filters and chunk_data is not None:
+                    if not metadata_matches(chunk_data, metadata_filters):
+                        chunk_data = None
                 all_text_units_lookup[c_id] = {
-                    "data": await text_chunks_db.get_by_id(c_id),
+                    "data": chunk_data,
                     "order": index,
                 }
 
     if any([v is None for v in all_text_units_lookup.values()]):
         logger.warning("Text chunks are missing, maybe the storage is damaged")
-    all_text_units = [
-        {"id": k, **v} for k, v in all_text_units_lookup.items() if v is not None
-    ]
+    all_text_units = []
+    for k, v in all_text_units_lookup.items():
+        if v is None:
+            continue
+        data = v.get("data") if v is not None else None
+        if data is None or "content" not in data:
+            continue
+        all_text_units.append({"id": k, **v})
     all_text_units = sorted(all_text_units, key=lambda x: x["order"])
     all_text_units = truncate_list_by_token_size(
         all_text_units,
@@ -1085,14 +1101,70 @@ async def naive_query(
     global_config: dict,
 ):
     use_model_func = global_config["llm_model_func"]
+    metadata_filters = query_param.metadata_filters or {}
+    chunk_metadata_cache: dict[str, dict[str, Any]] = {}
+
     results = await chunks_vdb.query(
-        query, top_k=query_param.top_k, metadata_filter=query_param.metadata_filter
+        query,
+        top_k=query_param.top_k,
+        metadata_filters=query_param.metadata_filters,
     )
     if not len(results):
-        return PROMPTS["fail_response"]
+        return ""
+
+    if metadata_filters:
+        chunk_details = await asyncio.gather(
+            *[text_chunks_db.get_by_id(r["id"]) for r in results]
+        )
+        filtered_results = []
+        for result, detail in zip(results, chunk_details):
+            combined_metadata = {
+                key: value
+                for key, value in result.items()
+                if key not in {"id", "content", "distance"}
+            }
+            if detail:
+                combined_metadata.update(detail)
+                chunk_metadata_cache[result["id"]] = detail
+            elif combined_metadata:
+                chunk_metadata_cache[result["id"]] = combined_metadata
+
+            if metadata_matches(combined_metadata, metadata_filters):
+                filtered_results.append(result)
+
+        results = filtered_results
+        if not results:
+            return ""
+
     chunks_ids = [r["id"] for r in results]
 
-    chunks = await text_chunks_db.get_by_ids(chunks_ids)
+    if metadata_filters:
+        chunks: list[dict[str, Any] | None] = []
+        missing_chunk_ids: list[str] = []
+        missing_indices: list[int] = []
+
+        for index, chunk_id in enumerate(chunks_ids):
+            cached = chunk_metadata_cache.get(chunk_id)
+            if cached is not None:
+                chunks.append(cached)
+            else:
+                chunks.append(None)
+                missing_chunk_ids.append(chunk_id)
+                missing_indices.append(index)
+
+        if missing_chunk_ids:
+            fetched_chunks = await asyncio.gather(
+                *[text_chunks_db.get_by_id(chunk_id) for chunk_id in missing_chunk_ids]
+            )
+            for idx, chunk_data in zip(missing_indices, fetched_chunks):
+                chunks[idx] = chunk_data
+
+        chunks = [chunk for chunk in chunks if chunk is not None]
+    else:
+        chunks = await text_chunks_db.get_by_ids(chunks_ids)
+
+    if not chunks:
+        return ""
 
     maybe_trun_chunks = truncate_list_by_token_size(
         chunks,
@@ -1274,9 +1346,7 @@ async def _build_mini_query_context(
 
     for ent in ent_from_query:
         ent_from_query_dict[ent] = []
-        results_node = await entity_name_vdb.query(
-            ent, top_k=query_param.top_k, metadata_filter=query_param.metadata_filter
-        )
+        results_node = await entity_name_vdb.query(ent, top_k=query_param.top_k)
 
         nodes_from_query_list.append(results_node)
         ent_from_query_dict[ent] = [e["entity_name"] for e in results_node]
@@ -1327,9 +1397,7 @@ async def _build_mini_query_context(
     )
 
     results_edge = await relationships_vdb.query(
-        originalquery,
-        top_k=len(ent_from_query) * query_param.top_k,
-        metadata_filter=query_param.metadata_filter,
+        originalquery, top_k=len(ent_from_query) * query_param.top_k
     )
     goodedge = []
     badedge = []
@@ -1382,11 +1450,37 @@ async def _build_mini_query_context(
 
     scorednode2chunk(ent_from_query_dict, scored_edged_reasoning_path)
 
+    metadata_filters = query_param.metadata_filters or {}
+    chunk_metadata_cache: dict[str, dict[str, Any]] = {}
+
     results = await chunks_vdb.query(
         originalquery,
         top_k=int(query_param.top_k / 2),
-        metadata_filter=query_param.metadata_filter,
+        metadata_filters=query_param.metadata_filters,
     )
+
+    if metadata_filters:
+        chunk_details = await asyncio.gather(
+            *[text_chunks_db.get_by_id(r["id"]) for r in results]
+        )
+        filtered_results = []
+        for result, detail in zip(results, chunk_details):
+            combined_metadata = {
+                key: value
+                for key, value in result.items()
+                if key not in {"id", "content", "distance"}
+            }
+            if detail:
+                combined_metadata.update(detail)
+                chunk_metadata_cache[result["id"]] = detail
+            elif combined_metadata:
+                chunk_metadata_cache[result["id"]] = combined_metadata
+
+            if metadata_matches(combined_metadata, metadata_filters):
+                filtered_results.append(result)
+
+        results = filtered_results
+
     chunks_ids = [r["id"] for r in results]
     final_chunk_id = kwd2chunk(
         ent_from_query_dict, chunks_ids, chunk_nums=int(query_param.top_k / 2)
@@ -1398,9 +1492,30 @@ async def _build_mini_query_context(
     if not len(results_edge):
         return None
 
-    use_text_units = await asyncio.gather(
-        *[text_chunks_db.get_by_id(id) for id in final_chunk_id]
-    )
+    if metadata_filters:
+        use_text_units = []
+        missing_chunk_ids = []
+        missing_indices = []
+
+        for index, chunk_id in enumerate(final_chunk_id):
+            cached = chunk_metadata_cache.get(chunk_id)
+            if cached is not None:
+                use_text_units.append(cached)
+            else:
+                use_text_units.append(None)
+                missing_chunk_ids.append(chunk_id)
+                missing_indices.append(index)
+
+        if missing_chunk_ids:
+            fetched_chunks = await asyncio.gather(
+                *[text_chunks_db.get_by_id(chunk_id) for chunk_id in missing_chunk_ids]
+            )
+            for idx, chunk_data in zip(missing_indices, fetched_chunks):
+                use_text_units[idx] = chunk_data
+    else:
+        use_text_units = await asyncio.gather(
+            *[text_chunks_db.get_by_id(id) for id in final_chunk_id]
+        )
     text_units_section_list = [["id", "content"]]
 
     for i, t in enumerate(use_text_units):

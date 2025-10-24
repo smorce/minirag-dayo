@@ -1,7 +1,7 @@
 import os
 import asyncio
 from dataclasses import dataclass
-from typing import Union
+from typing import Union, Optional, Any
 import numpy as np
 from chromadb import HttpClient
 from chromadb.config import Settings
@@ -141,20 +141,20 @@ class ChromaVectorDBStorage(BaseVectorStorage):
             raise
 
     async def query(
-        self, query: str, top_k=5, metadata_filter: dict = None
+        self,
+        query: str,
+        top_k=5,
+        metadata_filters: Optional[dict[str, Any]] = None,
     ) -> Union[dict, list[dict]]:
         try:
             embedding = await self.embedding_func([query])
 
-            query_params = {
-                "query_embeddings": embedding.tolist(),
-                "n_results": top_k * 2,  # Request more results to allow for filtering
-                "include": ["metadatas", "distances", "documents"],
-            }
-            if metadata_filter:
-                query_params["where"] = metadata_filter
-
-            results = self._collection.query(**query_params)
+            results = self._collection.query(
+                query_embeddings=embedding.tolist(),
+                n_results=top_k * 2,  # Request more results to allow for filtering
+                include=["metadatas", "distances", "documents"],
+                where=metadata_filters,
+            )
 
             # Filter results by cosine similarity threshold and take top k
             # We request 2x results initially to have enough after filtering

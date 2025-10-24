@@ -295,7 +295,7 @@ class MiniRAG:
             namespace="chunks",
             global_config=asdict(self),
             embedding_func=self.embedding_func,
-            meta_fields={"source", "full_doc_id"},
+            meta_fields={"full_doc_id", "chunk_order_index", "tokens"},
         )
 
         self.llm_model_func = limit_async_func_call(self.llm_model_max_async)(
@@ -338,17 +338,17 @@ class MiniRAG:
             # set client
             storage.db = db_client
 
-    def insert(self, string_or_strings, metadatas: dict | list[dict] | None = None):
+    def insert(self, string_or_strings):
         loop = always_get_an_event_loop()
-        return loop.run_until_complete(self.ainsert(string_or_strings, metadatas))
+        return loop.run_until_complete(self.ainsert(string_or_strings))
 
     async def ainsert(
         self,
         input: str | list[str],
-        metadatas: dict | list[dict] | None = None,
         split_by_character: str | None = None,
         split_by_character_only: bool = False,
         ids: str | list[str] | None = None,
+        metadatas: dict | list[dict] | None = None,
     ) -> None:
         if isinstance(input, str):
             input = [input]
@@ -400,7 +400,6 @@ class MiniRAG:
     ) -> None:
         """
         Pipeline for Processing Documents
-
         1. Validate ids if provided or generate MD5 hash IDs
         2. Remove duplicate contents
         3. Generate document initial status
@@ -411,35 +410,42 @@ class MiniRAG:
             input = [input]
         if isinstance(ids, str):
             ids = [ids]
+        if metadatas and len(input) != len(metadatas):
+            raise ValueError("Number of documents and metadatas must be the same")
 
         if ids is not None:
             if len(ids) != len(input):
                 raise ValueError("Number of IDs must match the number of documents")
             if len(ids) != len(set(ids)):
                 raise ValueError("IDs must be unique")
-            contents = {id_: doc for id_, doc in zip(ids, input)}
+            docs = {
+                id_: (doc, meta)
+                for id_, doc, meta in zip(
+                    ids, input, metadatas or ([{}] * len(input))
+                )
+            }
         else:
-            input = list(set(clean_text(doc) for doc in input))
-            contents = {compute_mdhash_id(doc, prefix="doc-"): doc for doc in input}
+            docs = {
+                compute_mdhash_id(doc, prefix="doc-"): (doc, meta)
+                for doc, meta in zip(input, metadatas or ([{}] * len(input)))
+            }
 
         unique_contents = {
-            id_: content
-            for content, id_ in {
-                content: id_ for id_, content in contents.items()
-            }.items()
+            doc: (id_, meta) for id_, (doc, meta) in docs.items()
         }
-        new_docs: dict[str, Any] = {}
-        for idx, (id_, content) in enumerate(unique_contents.items()):
-            doc_metadata = metadatas[idx] if metadatas and idx < len(metadatas) else {}
-            new_docs[id_] = {
+
+        new_docs: dict[str, Any] = {
+            id_: {
                 "content": content,
                 "content_summary": get_content_summary(content),
                 "content_length": len(content),
                 "status": DocStatus.PENDING,
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
-                "metadata": doc_metadata,
+                "metadata": meta,
             }
+            for content, (id_, meta) in unique_contents.items()
+        }
 
         all_new_doc_ids = set(new_docs.keys())
         unique_new_doc_ids = await self.doc_status.filter_keys(all_new_doc_ids)
@@ -489,11 +495,16 @@ class MiniRAG:
 
         for batch_idx, docs_batch in enumerate(docs_batches):
             for doc_id, status_doc in docs_batch:
+                metadata = status_doc.metadata or {}
+                # Dynamically update meta_fields in chunks_vdb
+                if metadata:
+                    self.chunks_vdb.meta_fields.update(metadata.keys())
+
                 chunks = {
                     compute_mdhash_id(dp["content"], prefix="chunk-"): {
                         **dp,
                         "full_doc_id": doc_id,
-                        **status_doc.metadata,
+                        **metadata,
                     }
                     for dp in self.chunking_func(
                         status_doc.content,
@@ -502,10 +513,11 @@ class MiniRAG:
                         self.tiktoken_model_name,
                     )
                 }
+
                 await asyncio.gather(
                     self.chunks_vdb.upsert(chunks),
                     self.full_docs.upsert(
-                        {doc_id: {"content": status_doc.content, **status_doc.metadata}}
+                        {doc_id: {"content": status_doc.content, **metadata}}
                     ),
                     self.text_chunks.upsert(chunks),
                 )

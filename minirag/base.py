@@ -21,6 +21,7 @@ class QueryParam:
     only_need_prompt: bool = False
     # When True, return structured provenance (entities/chunks) along with the answer or context
     include_provenance: bool = False
+    metadata_filters: Optional[dict[str, Any]] = None
     response_type: str = "Multiple Paragraphs"
     stream: bool = False
     # Number of top-k items to retrieve; corresponds to entities in "local" mode and relationships in "global" mode.
@@ -38,7 +39,6 @@ class QueryParam:
 
     hl_keywords: list[str] = field(default_factory=list)
     ll_keywords: list[str] = field(default_factory=list)
-    metadata_filter: Optional[dict] = field(default_factory=dict)
     # Conversation history support
     conversation_history: list[dict] = field(
         default_factory=list
@@ -68,7 +68,10 @@ class BaseVectorStorage(StorageNameSpace):
     meta_fields: set = field(default_factory=set)
 
     async def query(
-        self, query: str, top_k: int, metadata_filter: Optional[dict] = None
+        self,
+        query: str,
+        top_k: int,
+        metadata_filters: Optional[dict[str, Any]] = None,
     ) -> list[dict]:
         raise NotImplementedError
 
