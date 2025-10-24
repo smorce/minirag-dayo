@@ -177,3 +177,153 @@ def test_find_text_units_from_entities_respects_metadata_filters():
 
     assert len(text_units) == 1
     assert text_units[0]["full_doc_id"] == "doc-keep"
+
+
+def test_build_local_query_context_filters_entities_by_metadata():
+    class _EntitiesVDB:
+        async def query(self, query, top_k):
+            return [
+                {"entity_name": "KEEP", "distance": 0.1},
+                {"entity_name": "DROP", "distance": 0.2},
+            ]
+
+    class _Graph(_FakeGraphStorage):
+        async def node_degree(self, entity_name):
+            return 1
+
+    graph = _Graph(
+        {
+            "KEEP": GRAPH_FIELD_SEP.join(["chunk-1"]),
+            "DROP": GRAPH_FIELD_SEP.join(["chunk-2"]),
+        }
+    )
+    text_chunks = _FakeTextChunksDB(
+        {
+            "chunk-1": {
+                "content": "Chunk Keep",
+                "full_doc_id": "doc-keep",
+                "chunk_order_index": 0,
+                "tokens": 5,
+            },
+            "chunk-2": {
+                "content": "Chunk Drop",
+                "full_doc_id": "doc-drop",
+                "chunk_order_index": 1,
+                "tokens": 5,
+            },
+        }
+    )
+    param = QueryParam(metadata_filters={"full_doc_id": "doc-keep"})
+
+    with patch.object(
+        operate_module,
+        "truncate_list_by_token_size",
+        lambda items, **kwargs: items,
+    ):
+        context = asyncio.run(
+            operate_module._build_local_query_context(
+                "query",
+                graph,
+                _EntitiesVDB(),
+                text_chunks,
+                param,
+            )
+        )
+
+    assert context is not None
+    assert "KEEP" in context
+    assert "Chunk Keep" in context
+    assert "DROP" not in context
+    assert "Chunk Drop" not in context
+
+
+def test_build_mini_query_context_filters_entities_by_metadata():
+    class _EntityNameVDB:
+        async def query(self, query, top_k):
+            return [
+                {"entity_name": "KEEP", "distance": 0.1},
+                {"entity_name": "DROP", "distance": 0.2},
+            ]
+
+    class _RelationshipsVDB:
+        async def query(self, query, top_k):
+            return [{"src_id": "KEEP", "tgt_id": "DROP"}]
+
+    class _ChunksVDB:
+        async def query(self, query, top_k, metadata_filters=None):
+            return [{"id": "chunk-keep"}, {"id": "chunk-drop"}]
+
+    class _Graph(_FakeGraphStorage):
+        async def get_neighbors_within_k_hops(self, key, hops):
+            return {}
+
+        async def get_node_from_types(self, type_keywords):
+            return []
+
+        async def node_degree(self, entity_name):
+            return 1
+
+    text_chunks = _FakeTextChunksDB(
+        {
+            "chunk-keep": {
+                "content": "Chunk Keep",
+                "full_doc_id": "doc-keep",
+                "chunk_order_index": 0,
+                "tokens": 5,
+            },
+            "chunk-drop": {
+                "content": "Chunk Drop",
+                "full_doc_id": "doc-drop",
+                "chunk_order_index": 1,
+                "tokens": 5,
+            },
+        }
+    )
+
+    async def _fake_path2chunk(*args, **kwargs):
+        return {
+            "KEEP": {"Score": 1, "Path": ["chunk-keep"]},
+            "DROP": {"Score": 1, "Path": ["chunk-drop"]},
+        }
+
+    def _fake_cal_path_score_list(candidate, maybe):
+        return {
+            "KEEP": {"Score": 1, "Path": {}},
+            "DROP": {"Score": 1, "Path": {}},
+        }
+
+    param = QueryParam(metadata_filters={"full_doc_id": "doc-keep"}, top_k=2)
+
+    with patch.multiple(
+        operate_module,
+        truncate_list_by_token_size=lambda items, **kwargs: items,
+        cal_path_score_list=_fake_cal_path_score_list,
+        edge_vote_path=lambda path, edges: (path, {}),
+        path2chunk=_fake_path2chunk,
+        kwd2chunk=lambda ent_dict, chunk_ids, chunk_nums: chunk_ids,
+    ):
+        context = asyncio.run(
+            operate_module._build_mini_query_context(
+                ["query-entity"],
+                [],
+                "query",
+                _Graph(
+                    {
+                        "KEEP": GRAPH_FIELD_SEP.join(["chunk-keep"]),
+                        "DROP": GRAPH_FIELD_SEP.join(["chunk-drop"]),
+                    }
+                ),
+                _FakeVectorDB([]),
+                _EntityNameVDB(),
+                _RelationshipsVDB(),
+                _ChunksVDB(),
+                text_chunks,
+                None,
+                param,
+            )
+        )
+
+    assert "KEEP" in context
+    assert "Chunk Keep" in context
+    assert "DROP" not in context
+    assert "Chunk Drop" not in context
