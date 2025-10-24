@@ -295,6 +295,7 @@ class MiniRAG:
             namespace="chunks",
             global_config=asdict(self),
             embedding_func=self.embedding_func,
+            meta_fields={"full_doc_id", "chunk_order_index", "tokens"},
         )
 
         self.llm_model_func = limit_async_func_call(self.llm_model_max_async)(

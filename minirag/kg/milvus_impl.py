@@ -78,7 +78,12 @@ class MilvusVectorDBStorge(BaseVectorStorage):
         results = self._client.upsert(collection_name=self.namespace, data=list_data)
         return results
 
-    async def query(self, query, top_k=5):
+    async def query(
+        self,
+        query,
+        top_k=5,
+        metadata_filters=None,
+    ):
         embedding = await self.embedding_func([query])
         results = self._client.search(
             collection_name=self.namespace,
